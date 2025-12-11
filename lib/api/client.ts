@@ -7,11 +7,23 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 
 // Next.js uses NEXT_PUBLIC_ prefix for client-side env vars
-// Primary source: environment variable (set in Netlify, Vercel, etc.)
+// Automatically detect hostname when in browser for network access
 function getApiBaseUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
-    return process.env.NEXT_PUBLIC_API_BASE_URL;
+  // If explicitly set via environment variable, use it
+  if (process.env.NEXT_PUBLIC_CRI_API_BASE_URL) {
+    return process.env.NEXT_PUBLIC_CRI_API_BASE_URL;
   }
+  
+  // In browser, detect the current hostname and use it for network access
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    // If accessing via IP or network hostname, use that instead of localhost
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return `http://${hostname}:8000`;
+    }
+  }
+  
+  // Default to localhost for server-side rendering or local access
   return 'https://policestaging.codegnan.ai/';
 }
 
@@ -20,7 +32,7 @@ const API_BASE_URL = getApiBaseUrl();
 // Log API base URL in development for debugging
 if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
   console.log('API Base URL:', API_BASE_URL);
-  console.log('Environment variable NEXT_PUBLIC_API_BASE_URL:', process.env.NEXT_PUBLIC_API_BASE_URL);
+  console.log('Environment variable NEXT_PUBLIC_CRI_API_BASE_URL:', process.env.NEXT_PUBLIC_CRI_API_BASE_URL);
 }
 
 /**
@@ -60,13 +72,35 @@ apiClient.interceptors.request.use(
       const token = localStorage.getItem('auth_token');
       if (token && config.headers) {
         config.headers.Authorization = `Bearer ${token}`;
+      } else {
+        // Log when token is missing (helpful for debugging)
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('API Request without auth token:', config.url);
+        }
       }
     }
 
     // Log request in development
     if (process.env.NODE_ENV === 'development') {
       const fullUrl = `${config.baseURL}${config.url}`;
-      console.debug('API Request:', config.method?.toUpperCase(), fullUrl, config.params || '');
+      const authHeader = config.headers?.Authorization;
+      const hasAuth = !!authHeader;
+      const authTokenPreview = authHeader && typeof authHeader === 'string'
+        ? `${authHeader.substring(0, 20)}...` 
+        : 'none';
+      
+      console.debug('API Request:', {
+        method: config.method?.toUpperCase(),
+        url: fullUrl,
+        params: config.params || {},
+        hasAuth,
+        authTokenPreview,
+        headers: {
+          'Content-Type': config.headers?.['Content-Type'],
+          'Authorization': hasAuth ? 'present' : 'missing',
+          'Origin': typeof window !== 'undefined' ? window.location.origin : 'server-side'
+        }
+      });
     }
 
     return config;
@@ -85,11 +119,53 @@ apiClient.interceptors.response.use(
     // Log response in development
     if (process.env.NODE_ENV === 'development') {
       const fullUrl = `${response.config.baseURL}${response.config.url}`;
-      console.debug('API Response:', response.status, fullUrl, 'Data:', response.data);
+      const dataType = typeof response.data;
+      const isArray = Array.isArray(response.data);
+      const isEmpty = response.data === null || response.data === undefined ||
+                     (isArray && response.data.length === 0) ||
+                     (typeof response.data === 'object' && Object.keys(response.data).length === 0);
+      
+      // Get response size info
+      const contentLength = response.headers['content-length'];
+      const responseSize = response.data ? JSON.stringify(response.data).length : 0;
+      
+      console.debug('API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        url: fullUrl,
+        hasData: !!response.data,
+        dataType,
+        isArray,
+        isEmpty,
+        contentLength: contentLength || 'not set',
+        responseSize: `${responseSize} bytes`,
+        hasAuth: !!response.config.headers?.Authorization,
+        dataPreview: isEmpty ? 'empty' : (isArray ? `array[${response.data.length}]` :
+                     (typeof response.data === 'object' ? JSON.stringify(response.data).substring(0, 200) : response.data))
+      });
+      
+      // Warn if response is empty but status is 200
+      if (isEmpty && response.status === 200) {
+        console.warn('⚠️ Empty response body with 200 OK:', {
+          url: fullUrl,
+          hasAuth: !!response.config.headers?.Authorization,
+          headers: response.headers,
+          possibleReasons: [
+            'Backend returned empty data',
+            'Missing or invalid auth token',
+            'CORS preflight issue',
+            'Backend query returned no results'
+          ]
+        });
+      }
     }
     return response;
   },
   (error: AxiosError) => {
+    // Enhanced error logging for debugging
+    const requestUrl = error.config?.url ? `${error.config.baseURL}${error.config.url}` : 'unknown';
+    const requestMethod = error.config?.method?.toUpperCase() || 'UNKNOWN';
+    
     // Handle common errors with proper error objects
     if (error.response) {
       const status = error.response.status;
@@ -97,17 +173,26 @@ apiClient.interceptors.response.use(
 
       const errorMessage = data?.error || data?.detail || data?.message || error.message;
 
+      // Log detailed error information
+      console.error(`API Error [${status}]:`, {
+        method: requestMethod,
+        url: requestUrl,
+        message: errorMessage,
+        hasAuth: !!error.config?.headers?.Authorization,
+        responseData: data
+      });
+
       switch (status) {
         case 400:
           console.error('Bad Request:', errorMessage);
           throw new ApiError(errorMessage || 'Invalid request', 400, error.response.data);
         case 401:
-          console.error('Unauthorized access');
+          console.error('Unauthorized access - Token may be missing or expired');
           // Handle unauthorized (e.g., redirect to login)
           if (typeof window !== 'undefined') {
             localStorage.removeItem('auth_token');
           }
-          throw new ApiError('Unauthorized access', 401, error.response.data);
+          throw new ApiError('Unauthorized access. Please check your authentication token.', 401, error.response.data);
         case 403:
           console.error('Forbidden:', errorMessage);
           throw new ApiError(errorMessage || 'Access forbidden', 403, error.response.data);
@@ -125,21 +210,33 @@ apiClient.interceptors.response.use(
           throw new ApiError(errorMessage || 'An error occurred', status, error.response.data);
       }
     } else if (error.request) {
-      // Network error - no response received
+      // Network error - no response received (CORS, timeout, network failure)
       const apiUrl = API_BASE_URL;
-      // Only log as warning, not error, since this might be a transient issue
-      console.warn('Network error: No response received from server', {
-        url: apiUrl,
-        message: 'This may be a transient network issue. If alerts are loading, you can ignore this.',
-        error: error.message
+      console.error('Network error: No response received from server', {
+        method: requestMethod,
+        url: requestUrl,
+        baseUrl: apiUrl,
+        message: 'This may be a CORS issue, network timeout, or server is down.',
+        error: error.message,
+        hasAuth: !!error.config?.headers?.Authorization,
+        possibleCauses: [
+          'CORS preflight failed',
+          'Network timeout',
+          'Server is down or unreachable',
+          'Firewall blocking request'
+        ]
       });
       throw new ApiError(
-        `Network error: Unable to reach server at ${apiUrl}. Please ensure the backend is running.`,
+        `Network error: Unable to reach server at ${apiUrl}. This may be a CORS issue or network problem.`,
         0
       );
     } else {
       // Request setup error
-      console.error('Request error:', error.message);
+      console.error('Request setup error:', {
+        method: requestMethod,
+        url: requestUrl,
+        message: error.message
+      });
       throw new ApiError(error.message || 'Request setup failed', 0);
     }
   }
