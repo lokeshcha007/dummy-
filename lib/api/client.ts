@@ -7,24 +7,14 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 
 // Next.js uses NEXT_PUBLIC_ prefix for client-side env vars
-// Automatically detect hostname when in browser for network access
+// Primary source: environment variable (set in Netlify, Vercel, etc.)
 function getApiBaseUrl(): string {
-  // If explicitly set via environment variable, use it
-  if (process.env.NEXT_PUBLIC_CRI_API_BASE_URL) {
-    return process.env.NEXT_PUBLIC_CRI_API_BASE_URL;
+  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
+    return process.env.NEXT_PUBLIC_API_BASE_URL;
   }
-  
-  // In browser, detect the current hostname and use it for network access
-  if (typeof window !== 'undefined') {
-    const hostname = window.location.hostname;
-    // If accessing via IP or network hostname, use that instead of localhost
-    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
-      return `http://${hostname}:8000`;
-    }
-  }
-  
-  // Default to localhost for server-side rendering or local access
-  return 'http://localhost:8000';
+
+  // Fallback to staging URL if env is not set
+  return 'https://policestaging.codegnan.ai/';
 }
 
 const API_BASE_URL = getApiBaseUrl();
@@ -32,7 +22,7 @@ const API_BASE_URL = getApiBaseUrl();
 // Log API base URL in development for debugging
 if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
   console.log('API Base URL:', API_BASE_URL);
-  console.log('Environment variable NEXT_PUBLIC_CRI_API_BASE_URL:', process.env.NEXT_PUBLIC_CRI_API_BASE_URL);
+  console.log('Environment variable NEXT_PUBLIC_API_BASE_URL:', process.env.NEXT_PUBLIC_API_BASE_URL);
 }
 
 /**
